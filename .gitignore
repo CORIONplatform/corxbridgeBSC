@@ -1,0 +1,11 @@
+node_modules
+.secret
+secret.ts
+secretInfura.ts
+customer.js
+credentials.json
+yarn.lock
+package-lock.json
+/build
+/out
+reserve.bckp

@@ -6,7 +6,7 @@ import { providers, Wallet, Contract, BigNumber, utils } from "ethers";
 import Token from "./abis/Token.json";
 import BridgeAssist from "./abis/BridgeAssist.json";
 import walletPrivateKey from "./secret"; // 0x48d936dc37216a7d1B468a0b0426b37e68008eA9 wallet privateKey
-import infuraKey from "./secretInfura";
+import alchemyKey from "./secretAlchemy";
 const address_BAB = "0xEFA7eAb30F3DdDFC3926F4083f319d7B6238BFD7"; // BSC Mainnet: 0xEFA7eAb30F3DdDFC3926F4083f319d7B6238BFD7 | BSC Testnet: 0xCA661795d34535dB71bB09e58fE32a5c654Ce7b8
 const address_BAE = "0x7302b2F207b02Bcc2dea68C0950EB0Dc6C695b84"; // ETH Mainnet: 0x7302b2F207b02Bcc2dea68C0950EB0Dc6C695b84 | ETH Ropsten: 0xE5B9DD83e066650804fC28BCE24d372f09Fd5228
 const address_TKNB = "0x36184181FA321E350aaAF88dad723E281365c1Ac"; // BSC Mainnet: 0x36184181FA321E350aaAF88dad723E281365c1Ac | BSC Testnet: 0x00EE45b4dED7df3B85a0305a5c7014c7dA455ad3
@@ -15,7 +15,7 @@ const address_TKNE = "0x26a604DFFE3ddaB3BEE816097F81d3C4a2A4CF97"; // ETH Mainne
 const _RPCS = ["https://bsc-dataseed1.ninicoin.io/", "https://bsc-dataseed1.defibit.io/", "https://bsc-dataseed.binance.org/"]; // BSC RPCs sometimes lag and fail transactions
 // const _RPCS = ["https://data-seed-prebsc-2-s2.binance.org:8545/", "https://data-seed-prebsc-2-s2.binance.org:8545/", "https://data-seed-prebsc-2-s2.binance.org:8545/"]; // for testnet setup
 const providerB = new providers.JsonRpcProvider(_RPCS[2]); // for reading contracts
-const providerE = new providers.InfuraProvider(1, infuraKey); // for reading contracts
+const providerE = new providers.AlchemyProvider(1, alchemyKey); // for reading contracts
 
 // queues and buffer lifetime
 const TIME_QUEUE = 120000;
@@ -178,7 +178,7 @@ app.get("/process", async (req: any, res: any) => {
       throw result.err;
     }
     logger.info(`${_prefix}: Success. Collect: ${result.txHashCollect}, Dispense: ${result.txHashDispense}`);
-    res.status(200).send({ txHashCollect: result.txHashCollect, txHashDispense: result.txHashCollect });
+    res.status(200).send({ txHashCollect: result.txHashCollect, txHashDispense: result.txHashDispense });
   } catch (error) {
     logger.error(`${_prefix}: Failed. Error: ${error.message}`);
     logger.error(`[error.reason]: [${error.reason}]`);

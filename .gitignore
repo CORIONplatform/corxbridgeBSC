@@ -1,11 +1,10 @@
-node_modules
 .secret
 secret.ts
-secretInfura.ts
+secretAlchemy.ts
 customer.js
 credentials.json
-yarn.lock
 package-lock.json
+
+node_modules
 /build
 /out
-reserve.bckp

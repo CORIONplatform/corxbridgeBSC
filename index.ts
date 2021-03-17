@@ -20,16 +20,23 @@ const providerE = new providers.AlchemyProvider(1, alchemyKey); // for reading c
 // queues and buffer lifetime
 const TIME_QUEUE = 120000;
 const TIME_PARAMS = 30000;
+const TIME_PRICE = 30000;
 
 import bunyan from "bunyan";
 import { LoggingBunyan } from "@google-cloud/logging-bunyan";
+import axios from "axios";
 const loggingBunyan = new LoggingBunyan();
 const logger = bunyan.createLogger({ name: "my-service", streams: [loggingBunyan.stream("debug")] });
 
 // Info Buffers
 type DirectionType = "BE" | "EB";
-type ChangeableParams = { PSD: boolean; MIN: string; FEE: string };
-let paramsBuffer = { date: 0, params: { PSD: false, MIN: "300000000000", FEE: "13" } as ChangeableParams }; // Minimum 3000 CORX and Fee 0.13%
+type ChangeableParams = { CTF: number; FTM: number; FEE: number; PSD: boolean };
+type ProbitDataType = { last: string; low: string; high: string; change: string; base_volume: string; quote_volume: string; market_id: string; time: string };
+type PricesBuffer = { date: number; prices: { TU: number; BU: number; EU: number; TBP: number; TEP: number } };
+type CostBuffer = { date: number; cost: BigNumber };
+let paramsBuffer = { date: 0, params: { CTF: 200, FTM: 200, FEE: 13, PSD: false } as ChangeableParams };
+let costBuffers = { BE: { date: 0, cost: BigNumber.from(0) }, EB: { date: 0, cost: BigNumber.from(0) } } as { [key in DirectionType]: CostBuffer };
+let pricesBuffer = { date: 0, prices: { TU: 0, BU: 0, EU: 0, TBP: 0, TEP: 0 } } as PricesBuffer;
 
 async function loadChangeableParams() {
   if (Date.now() - paramsBuffer.date < TIME_PARAMS) return paramsBuffer.params;
@@ -44,7 +51,7 @@ async function loadChangeableParams() {
 }
 async function writeQueue(direction: DirectionType, address: string) {
   try {
-    await db.collection(`queue${direction}`).doc(address).set({ date: Date.now() });
+    await db.collection(`queue${direction}`).doc(address).create({ date: Date.now() });
   } catch (error) {
     throw new Error(`Could not write to queue: ${error.reason || error.message}`);
   }
@@ -63,7 +70,62 @@ async function assertQueue(direction: DirectionType, address: string) {
   } catch (error) {
     throw new Error(`Could not check request queue: ${error.reason || error.message}`);
   }
-  if (entry && Date.now() - entry.date < TIME_QUEUE) throw new Error(`Request done recently: timeout is ${TIME_QUEUE}ms`);
+  if (entry) {
+    if (Date.now() - entry.date < TIME_QUEUE) throw new Error(`Request done recently: timeout is ${TIME_QUEUE}ms`);
+    else await db.collection(`queue${direction}`).doc(address).delete(); // if it was left undeleted since last time
+  }
+}
+async function getPrices() {
+  if (Date.now() - pricesBuffer.date < TIME_PRICE) return pricesBuffer.prices;
+  try {
+    const res = (await axios.get(`https://api.probit.com/api/exchange/v1/ticker?market_ids=CORX-USDT,BNB-USDT,ETH-USDT`)).data as {
+      data: [ProbitDataType, ProbitDataType, ProbitDataType];
+    };
+    if (!res.data?.length) throw new Error("No such pairs");
+    const TU = Number(res.data[0].last);
+    const BU = Number(res.data[1].last);
+    const EU = Number(res.data[2].last);
+    const TEP = TU / EU;
+    const TBP = TU / BU;
+    const prices = { TU, BU, EU, TBP, TEP };
+    pricesBuffer = { date: Date.now(), prices };
+    return prices;
+  } catch (error) {
+    throw new Error(`Could not get CORX price: ${error.mssage}`);
+  }
+}
+// Calculate Cost
+function _calcCost(gas: BigNumber, gasPrice: BigNumber, tknPrice: number) {
+  return gasPrice
+    .mul(gas)
+    .mul(1e8)
+    .div(Math.trunc(tknPrice * 1e8))
+    .div(1e10); // decimals() difference between CORX and ETH/BNB is 10
+}
+function calcCost(BG: BigNumber, BGP: BigNumber, TBP: number, EG: BigNumber, EGP: BigNumber, TEP: number) {
+  return _calcCost(BG, BGP, TBP).add(_calcCost(EG, EGP, TEP));
+}
+// Estimate Cost
+async function estimateCost(direction: DirectionType) {
+  if (Date.now() - Number(costBuffers[direction].date) < TIME_PRICE) return costBuffers[direction].cost;
+  const _GPs = { BE: [BigNumber.from(26000), BigNumber.from(58000)], EB: [BigNumber.from(72000), BigNumber.from(54000)] }; // [BGas, EGas]
+  try {
+    const [BGP, EGP, { TBP, TEP }] = await Promise.all([providerB.getGasPrice(), providerE.getGasPrice(), getPrices()]);
+    const cost = calcCost(BigNumber.from(_GPs[direction][0]), BGP, TBP, BigNumber.from(_GPs[direction][1]), EGP, TEP);
+    costBuffers[direction] = { date: Date.now(), cost };
+    return cost;
+  } catch (error) {
+    throw new Error(`Could not estimate cost: ${error.reason || error.message}`);
+  }
+}
+// Estimate Fees applied
+async function estimateFee(direction: DirectionType) {
+  try {
+    const [cost, { CTF }] = await Promise.all([estimateCost(direction), loadChangeableParams()]);
+    return cost.mul(CTF).div(100);
+  } catch (error) {
+    throw new Error(`Could not estimate fee: ${error.message}`);
+  }
 }
 // Check safety of following swap attempt
 async function assureSafety(direction: DirectionType, address: string): Promise<{ allowance: BigNumber; balance: BigNumber; fee: BigNumber }> {
@@ -72,10 +134,16 @@ async function assureSafety(direction: DirectionType, address: string): Promise<
     const _address_TKN = { BE: address_TKNB, EB: address_TKNE }[direction];
     const _address_BA = { BE: address_BAB, EB: address_BAE }[direction];
     const TKN = new Contract(_address_TKN, Token.abi, _provider);
-    const [allowance, balance, params] = await Promise.all([TKN.allowance(address, _address_BA), TKN.balanceOf(address), loadChangeableParams()]);
-    const fee = allowance.mul(params.FEE).div(10000);
-    logger.debug(`assureSafety(): [direction]:${direction}|[address]:${address}|[allowance]:${allowance}|[balance]:${balance}|[fee]:${fee}`);
-    if (allowance.lt(params.MIN)) throw new Error(`Amount is too low. Should be not less than ${BigNumber.from(params.MIN).div(1e8).toString()} CORX`);
+    const [allowance, balance, _fee, params]: [BigNumber, BigNumber, BigNumber, ChangeableParams] = await Promise.all([
+      TKN.allowance(address, _address_BA),
+      TKN.balanceOf(address),
+      estimateFee(direction),
+      loadChangeableParams(),
+    ]);
+    const fee = allowance.mul(params.FEE).div(10000).add(_fee);
+    const min = _fee.mul(params.FTM).div(100);
+    logger.debug(`assureSafety(): [direction]:${direction}|[address]:${address}|[allowance]:${allowance}|[balance]:${balance}|[_fee]:${_fee}|${fee}`);
+    if (allowance.lt(min)) throw new Error(`Amount is too low. Should be not less than ${BigNumber.from(min).div(1e8).toString()} CORX`);
     if (allowance.gt(balance)) throw new Error(`Actual balance (${balance.toString()}) is lower than allowance (${allowance.toString()})`);
     return { allowance, balance, fee };
   } catch (error) {
@@ -197,6 +265,14 @@ app.get("/process", async (req: any, res: any) => {
     } else {
       res.status(400).send(error.reason || error.message);
     }
+  }
+});
+app.get("/info/costs", async (req: any, res: any) => {
+  try {
+    const [BE, EB] = (await Promise.all([estimateCost("BE"), estimateCost("EB")])).map((c) => c.toString());
+    res.status(200).send({ BE, EB });
+  } catch (error) {
+    res.status(400).send(error.reason || error.message);
   }
 });
 const port = process.env.PORT || 3001;
